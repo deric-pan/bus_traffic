@@ -1,0 +1,183 @@
+---
+title: "Readme"
+author: "Deric Pan, dericpan"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T,
+                      results = "hide", message=FALSE, warning=FALSE)
+```
+
+To begin this project: the following libraries are imported and the file is read in like so:
+```{r}
+library(boot)
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(chron)
+library(reshape2)
+buses = read.csv("Bus_Breakdown_and_Delays.csv", na.strings = c("", "NA"))
+```
+
+The data is then cleaned:
+```{r}
+buses = buses %>% filter(Boro %in% c("Manhattan", "Bronx", "Brooklyn", "Queens", "Staten Island")) %>% na.omit(How_Long_Delayed) %>% select(School_Year, Route_Number, Reason, Occurred_On, Boro, How_Long_Delayed)
+buses = buses %>% filter(Reason == "Heavy Traffic")
+
+buses = buses %>% mutate(Occurred_On = as.POSIXct(buses$Occurred_On, format = "%m/%d/%y %H:%M")) %>% mutate(x = as.POSIXct(buses$Occurred_On, format = "%m/%d/%y %H:%M")) %>% mutate(Occurred_On = strftime(Occurred_On, format = "%H:%M:%S")) %>% mutate(Occurred_on = as.POSIXct(buses$Occurred_On, format = "%H:%M:%S")) %>% select(School_Year, Route_Number, Occurred_On, Boro, How_Long_Delayed, x)
+
+buses$Boro <- droplevels(buses$Boro)
+buses$School_Year = droplevels(buses$School_Year, exclude = "2018-2019")
+
+
+buses$How_Long_Delayed <- gsub("([0-9-]*)(.*)","\\1",buses$How_Long_Delayed)
+buses$How_Long_Delayed <- gsub("0-15","15",buses$How_Long_Delayed)
+buses$How_Long_Delayed <- gsub("16-30","30",buses$How_Long_Delayed)
+buses$How_Long_Delayed <- gsub("31-45","45",buses$How_Long_Delayed)
+buses$How_Long_Delayed <- gsub("46-60","60",buses$How_Long_Delayed)
+buses <- buses[ !(buses$How_Long_Delayed %in% c(1,2,3)), ]
+
+buses$How_Long_Delayed = as.numeric(buses$How_Long_Delayed)
+buses = buses %>% na.omit(How_Long_Delayed)
+
+buses = buses %>% mutate(Hour_Of_Day = hour(x))
+buses <- buses %>% 
+          mutate(Time_Of_Day = case_when(
+                 .$Hour_Of_Day >= 6 & .$Hour_Of_Day < 10 ~ 'Morning',
+                  .$Hour_Of_Day >= 10 & .$Hour_Of_Day < 16 ~ 'Midday',
+                    TRUE ~ "Evening"
+             ))
+worked = buses %>% select(How_Long_Delayed, Time_Of_Day)
+```
+
+Data:
+```{r}
+ggplot(buses, aes(x=buses$How_Long_Delayed,fill = buses$Time_Of_Day)) +
+  geom_histogram(binwidth = 10)+scale_x_continuous(breaks = c(15,30,45,60,75,90,105,120,135,150))+ggtitle("Bus Delay Length Count") + labs(title = "Bus Delay Counts", x = "Minutes", y = "Count")
+```
+
+```{r}
+ggplot(buses, aes(x=buses$How_Long_Delayed,fill = buses$School_Year)) +
+  geom_histogram(binwidth = 10)+scale_x_continuous(breaks = c(15,30,45,60,75,90,105,120,135,150)) + labs(title = "Bus Delay Counts by Year", x = "Minutes", y = "Count")
+```
+
+```{r}
+boxplot(How_Long_Delayed ~ Time_Of_Day, data = buses, main = "Box Plot of Delays (minutes) by Time of Day", xlab = "Time Of Day", ylab = "Minutes")
+```
+
+Running Wilcox Tests:
+```{r}
+wilcox.test(How_Long_Delayed ~ Time_Of_Day, data = buses, subset = Time_Of_Day %in% c("Midday", "Morning"), conf.level = .95)
+
+#p-value extremely high, so we know that we fail to reject the null hypothesis that they have equal medians
+
+wilcox.test(How_Long_Delayed ~ Time_Of_Day, data = buses, subset = Time_Of_Day %in% c("Midday", "Evening"), conf.level = .95)
+
+wilcox.test(How_Long_Delayed ~ Time_Of_Day, data = buses, subset = Time_Of_Day %in% c("Morning", "Evening"), conf.level = .95)
+```
+
+Running the code below produces a vector of p.values:
+```{r}
+y = buses$How_Long_Delayed
+a = buses$How_Long_Delayed[buses$Time_Of_Day == "Morning"]
+b = buses$How_Long_Delayed[buses$Time_Of_Day == "Evening"]
+
+thetas = seq(-5,5, length.out = 10)
+
+wp_vec = vector()
+power_vec = vector()
+for (theta in thetas) {
+  new_a = a + theta
+  wp = wilcox.test(new_a, b)$p.value
+  wp_vec = append(wp_vec, wp)
+}
+```
+
+Here, assume that mornings are distributed by poisson(20), simulate power of wilcox test with a+theta for morning = a & theta = 1.25, compare the two methods 
+```{r}
+wts.p = replicate(1000, {
+  wts = wilcox.test(rpois(100, 20),
+               rpois(100,20) + 1.25)
+  wts$p.value <= 0.05 
+  })
+binom.test(sum(wts.p), 1000, conf.level = .95)
+
+kts.p = replicate(1000, {
+  kts = ks.test(rpois(100,20),
+                rpois(100,20) + 1.25)
+  kts$p.value <= 0.05
+})
+binom.test(sum(kts.p), 1000, conf.level = .95)
+
+
+```
+Create 95% confidence interval for thetas:
+```{r}
+range(thetas[wp_vec >= .05])
+```
+Test power with theta in 2.3
+```{r}
+wts.p = replicate(1000, {
+  wts = wilcox.test(rpois(100, 20),
+               rpois(100,20) + 2.3)
+  wts$p.value <= 0.05 
+  })
+binom.test(sum(wts.p), 1000, conf.level = .95)
+```
+Test power with increasing thetas:
+```{r}
+powers_vec = vector()
+conf_95_thetas = seq(.5556, 3.8889, length.out = 100)
+for (theta in conf_95_thetas){
+  wts.p = replicate(1000, {
+  wts = wilcox.test(rpois(100, 20),
+               rpois(100,20) + theta)
+  wts$p.value <= 0.05 
+  })
+powers_vec = append(powers_vec,binom.test(sum(wts.p), 1000, conf.level = .95)$estimate)
+}
+```
+Plot power curve:
+```{r}
+plot(conf_95_thetas, powers_vec, type = "l", xlab = "Theta", ylab = "Power")
+```
+Observe medians:
+```{r}
+median(buses$How_Long_Delayed[buses$Time_Of_Day == "Morning"])
+median(buses$How_Long_Delayed[buses$Time_Of_Day == "Midday"])
+median(buses$How_Long_Delayed[buses$Time_Of_Day == "Evening"])
+```
+Observe means:
+```{r}
+mean(buses$How_Long_Delayed[buses$Time_Of_Day == "Morning"])
+mean(buses$How_Long_Delayed[buses$Time_Of_Day == "Midday"])
+mean(buses$How_Long_Delayed[buses$Time_Of_Day == "Evening"])
+```
+Bootstraps for mean delay in minutes for respective times of day:
+```{r}
+mean_boot = function(data, index) {
+  data_star = data[index,]
+  mean_bus = mean(data_star$`How_Long_Delayed`[data_star$Time_Of_Day == "Morning"])
+  return(mean_bus)
+}  
+boot_mean = boot(buses, statistic = mean_boot, R = 1000)
+boot.ci(boot_mean, type = "norm")
+```
+```{r}
+mean_boot = function(data, index) {
+  data_star = data[index,]
+  mean_bus = mean(data_star$`How_Long_Delayed`[data_star$Time_Of_Day == "Midday"])
+  return(mean_bus)
+}  
+boot_mean = boot(buses, statistic = mean_boot, R = 1000)
+boot.ci(boot_mean, type = "norm")
+```
+```{r}
+mean_boot = function(data, index) {
+  data_star = data[index,]
+  mean_bus = mean(data_star$`How_Long_Delayed`[data_star$Time_Of_Day == "Evening"])
+  return(mean_bus)
+}  
+boot_mean = boot(buses, statistic = mean_boot, R = 1000)
+boot.ci(boot_mean, type = "norm")
+```
